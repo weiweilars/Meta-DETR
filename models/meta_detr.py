@@ -5,14 +5,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.weight_norm import WeightNorm
 
-from util import box_ops
-from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
-                       accuracy, get_world_size, is_dist_avail_and_initialized, inverse_sigmoid)
+from ..util import box_ops
+from ..util.misc import (
+    NestedTensor,
+    nested_tensor_from_tensor_list,
+    accuracy,
+    get_world_size,
+    is_dist_avail_and_initialized,
+    inverse_sigmoid,
+)
 
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .deformable_transformer import build_deforamble_transformer
-from .deformable_transformer import DeformableTransformerDecoderLayer, DeformableTransformerDecoder
+from .deformable_transformer import (
+    DeformableTransformerDecoderLayer,
+    DeformableTransformerDecoder,
+)
 from .position_encoding import TaskPositionalEncoding, QueryEncoding
 
 
@@ -26,14 +35,18 @@ class distLinear(nn.Module):
         self.L = nn.Linear(indim, outdim, bias=False)
         self.class_wise_learnable_norm = True
         if self.class_wise_learnable_norm:
-            WeightNorm.apply(self.L, 'weight', dim=0)
+            WeightNorm.apply(self.L, "weight", dim=0)
         self.scale_factor = 10
 
     def forward(self, x):
         x_norm = torch.norm(x, p=2, dim=1).unsqueeze(1).expand_as(x)
         x_normalized = x.div(x_norm + 0.00001)
         if not self.class_wise_learnable_norm:
-            L_norm = torch.norm(self.L.weight.data, p=2, dim=1).unsqueeze(1).expand_as(self.L.weight.data)
+            L_norm = (
+                torch.norm(self.L.weight.data, p=2, dim=1)
+                .unsqueeze(1)
+                .expand_as(self.L.weight.data)
+            )
             self.L.weight.data = self.L.weight.data.div(L_norm + 0.00001)
         cos_dist = self.L(x_normalized)
         scores = self.scale_factor * cos_dist
@@ -41,9 +54,20 @@ class distLinear(nn.Module):
 
 
 class MetaDETR(nn.Module):
-    """ This is the Meta-DETR module that performs object detection """
-    def __init__(self, args, backbone, transformer, num_classes, num_queries, num_feature_levels, aux_loss=True, with_box_refine=False):
-        """ Initializes the model.
+    """This is the Meta-DETR module that performs object detection"""
+
+    def __init__(
+        self,
+        params,
+        backbone,
+        transformer,
+        num_classes,
+        num_queries,
+        num_feature_levels,
+        aux_loss=True,
+        with_box_refine=False,
+    ):
+        """Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
             transformer: the deform-transformer architecture. See deformable_transformer.py
@@ -53,29 +77,36 @@ class MetaDETR(nn.Module):
             with_box_refine: iterative bounding box refinement.
         """
         super().__init__()
-        self.args = args
+        self.args = params
         self.num_classes = num_classes
         self.num_queries = num_queries
-        self.hidden_dim = args.hidden_dim
+        self.hidden_dim = params.hidden_dim
         self.num_feature_levels = num_feature_levels
 
         self.transformer = transformer
-        self.task_positional_encoding = TaskPositionalEncoding(self.hidden_dim, dropout=0., max_len=self.args.episode_size)
+
+        self.task_positional_encoding = TaskPositionalEncoding(
+            self.hidden_dim, dropout=0.0, max_len=self.args.episode_size
+        )
         self.class_embed = nn.Linear(self.hidden_dim, self.args.episode_size)
         self.bbox_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
-        if args.category_codes_cls_loss:
+        if params.category_codes_cls_loss:
             if num_feature_levels == 1:
                 self.category_codes_cls = distLinear(self.hidden_dim, self.num_classes)
             elif num_feature_levels > 1:
                 category_codes_cls_list = []
                 for _ in range(self.num_feature_levels):
-                    category_codes_cls_list.append(distLinear(self.hidden_dim, self.num_classes))
+                    category_codes_cls_list.append(
+                        distLinear(self.hidden_dim, self.num_classes)
+                    )
                 self.category_codes_cls = nn.ModuleList(category_codes_cls_list)
             else:
                 raise RuntimeError
 
         # self.query_embed = nn.Embedding(self.num_queries, self.hidden_dim * 2)
-        queryencoding = QueryEncoding(self.hidden_dim, dropout=0., max_len=self.num_queries)
+        queryencoding = QueryEncoding(
+            self.hidden_dim, dropout=0.0, max_len=self.num_queries
+        )
         qe = queryencoding()
         self.query_embed = torch.cat([qe, qe], dim=1)
 
@@ -84,23 +115,38 @@ class MetaDETR(nn.Module):
             input_proj_list = []
             for _ in range(num_backbone_outs):
                 in_channels = backbone.num_channels[_]
-                input_proj_list.append(nn.Sequential(
-                    nn.Conv2d(in_channels, self.hidden_dim, kernel_size=1),
-                    nn.GroupNorm(32, self.hidden_dim),
-                ))
+                input_proj_list.append(
+                    nn.Sequential(
+                        nn.Conv2d(in_channels, self.hidden_dim, kernel_size=1),
+                        nn.GroupNorm(32, self.hidden_dim),
+                    )
+                )
             for _ in range(self.num_feature_levels - num_backbone_outs):
-                input_proj_list.append(nn.Sequential(
-                    nn.Conv2d(in_channels, self.hidden_dim, kernel_size=3, stride=2, padding=1),
-                    nn.GroupNorm(32, self.hidden_dim),
-                ))
+                input_proj_list.append(
+                    nn.Sequential(
+                        nn.Conv2d(
+                            in_channels,
+                            self.hidden_dim,
+                            kernel_size=3,
+                            stride=2,
+                            padding=1,
+                        ),
+                        nn.GroupNorm(32, self.hidden_dim),
+                    )
+                )
                 in_channels = self.hidden_dim
             self.input_proj = nn.ModuleList(input_proj_list)
         else:
-            self.input_proj = nn.ModuleList([
-                nn.Sequential(
-                    nn.Conv2d(backbone.num_channels[0], self.hidden_dim, kernel_size=1),
-                    nn.GroupNorm(32, self.hidden_dim),
-                )])
+            self.input_proj = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Conv2d(
+                            backbone.num_channels[0], self.hidden_dim, kernel_size=1
+                        ),
+                        nn.GroupNorm(32, self.hidden_dim),
+                    )
+                ]
+            )
         self.backbone = backbone
         self.with_box_refine = with_box_refine
         self.aux_loss = aux_loss
@@ -114,18 +160,20 @@ class MetaDETR(nn.Module):
             nn.init.xavier_uniform_(proj[0].weight, gain=1)
             nn.init.constant_(proj[0].bias, 0)
 
-        assert args.hidden_dim == self.hidden_dim
-        decoder_layer = DeformableTransformerDecoderLayer(args.hidden_dim,
-                                                          args.dim_feedforward,
-                                                          args.dropout,
-                                                          'relu',
-                                                          args.num_feature_levels,
-                                                          args.nheads,
-                                                          args.dec_n_points)
+        assert params.hidden_dim == self.hidden_dim
+        decoder_layer = DeformableTransformerDecoderLayer(
+            params.hidden_dim,
+            params.dim_feedforward,
+            params.dropout,
+            "relu",
+            params.num_feature_levels,
+            params.nheads,
+            params.dec_n_points,
+        )
 
-        self.meta_decoder = DeformableTransformerDecoder(decoder_layer,
-                                                         args.dec_layers,
-                                                         return_intermediate=True)
+        self.meta_decoder = DeformableTransformerDecoder(
+            decoder_layer, params.dec_layers, return_intermediate=True
+        )
 
         num_pred = self.meta_decoder.num_layers
         if with_box_refine:
@@ -136,10 +184,20 @@ class MetaDETR(nn.Module):
             self.meta_decoder.bbox_embed = self.bbox_embed
         else:
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
-            self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
+            self.class_embed = nn.ModuleList(
+                [self.class_embed for _ in range(num_pred)]
+            )
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
 
-    def forward(self, samples, targets=None, supp_samples=None, supp_class_ids=None, supp_targets=None, category_codes=None):
+    def forward(
+        self,
+        samples,
+        targets=None,
+        supp_samples=None,
+        supp_class_ids=None,
+        supp_targets=None,
+        category_codes=None,
+    ):
 
         if not isinstance(samples, NestedTensor):
             samples = nested_tensor_from_tensor_list(samples)
@@ -184,7 +242,9 @@ class MetaDETR(nn.Module):
                 else:
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
-                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
+                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(
+                    torch.bool
+                )[0]
                 pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
                 srcs.append(src)
                 masks.append(mask)
@@ -201,21 +261,48 @@ class MetaDETR(nn.Module):
 
             if self.num_feature_levels == 1:
                 if (support_batchsize * (i + 1)) <= num_support:
-                    cc = [c[(support_batchsize * i): (support_batchsize * (i + 1)), :].unsqueeze(0).expand(batchsize, -1, -1) for c in category_codes]
-                    episode_class_ids = supp_class_ids[(support_batchsize * i): (support_batchsize * (i + 1))]
+                    cc = [
+                        c[(support_batchsize * i) : (support_batchsize * (i + 1)), :]
+                        .unsqueeze(0)
+                        .expand(batchsize, -1, -1)
+                        for c in category_codes
+                    ]
+                    episode_class_ids = supp_class_ids[
+                        (support_batchsize * i) : (support_batchsize * (i + 1))
+                    ]
                 else:
-                    cc = [c[-support_batchsize:, :].unsqueeze(0).expand(batchsize, -1, -1) for c in category_codes]
+                    cc = [
+                        c[-support_batchsize:, :].unsqueeze(0).expand(batchsize, -1, -1)
+                        for c in category_codes
+                    ]
                     episode_class_ids = supp_class_ids[-support_batchsize:]
             elif self.num_feature_levels == 4:
                 raise NotImplementedError
             else:
                 raise NotImplementedError
 
-            _, init_reference, _, encoder_outputs = \
-                self.transformer(srcs, masks, pos, query_embeds, cc,
-                                 self.task_positional_encoding(torch.zeros(self.args.episode_size, self.hidden_dim, device=device)).unsqueeze(0).expand(batchsize, -1, -1))
+            _, init_reference, _, encoder_outputs = self.transformer(
+                srcs,
+                masks,
+                pos,
+                query_embeds,
+                cc,
+                self.task_positional_encoding(
+                    torch.zeros(self.args.episode_size, self.hidden_dim, device=device)
+                )
+                .unsqueeze(0)
+                .expand(batchsize, -1, -1),
+            )
 
-            (memory, spatial_shapes, level_start_index, valid_ratios, query_embed, mask_flatten, tgt) = encoder_outputs
+            (
+                memory,
+                spatial_shapes,
+                level_start_index,
+                valid_ratios,
+                query_embed,
+                mask_flatten,
+                tgt,
+            ) = encoder_outputs
 
             # Category-agnostic transformer decoder
             hs, inter_references = self.meta_decoder(
@@ -246,8 +333,14 @@ class MetaDETR(nn.Module):
                     assert reference.shape[-1] == 2
                     tmp[..., :2] += reference
                 outputs_coord = tmp.sigmoid()
-                outputs_classes.append(outputs_class.view(batchsize, self.num_queries, self.args.episode_size))
-                outputs_coords.append(outputs_coord.view(batchsize, self.num_queries, 4))
+                outputs_classes.append(
+                    outputs_class.view(
+                        batchsize, self.num_queries, self.args.episode_size
+                    )
+                )
+                outputs_coords.append(
+                    outputs_coord.view(batchsize, self.num_queries, 4)
+                )
 
             meta_outputs_classes.append(torch.stack(outputs_classes))
             meta_outputs_coords.append(torch.stack(outputs_coords))
@@ -259,72 +352,115 @@ class MetaDETR(nn.Module):
         for b in range(batchsize):
             for episode_class_ids in meta_support_class_ids:
                 meta_target = dict()
-                target_indexes = [i for i, x in enumerate(targets[b]['labels'].tolist()) if x in episode_class_ids]
-                meta_target['boxes'] = targets[b]['boxes'][target_indexes]
-                meta_target['labels'] = targets[b]['labels'][target_indexes]
-                meta_target['area'] = targets[b]['area'][target_indexes]
-                meta_target['iscrowd'] = targets[b]['iscrowd'][target_indexes]
-                meta_target['image_id'] = targets[b]['image_id']
-                meta_target['size'] = targets[b]['size']
-                meta_target['orig_size'] = targets[b]['orig_size']
+                target_indexes = [
+                    i
+                    for i, x in enumerate(targets[b]["labels"].tolist())
+                    if x in episode_class_ids
+                ]
+                meta_target["boxes"] = targets[b]["boxes"][target_indexes]
+                meta_target["labels"] = targets[b]["labels"][target_indexes]
+                meta_target["area"] = targets[b]["area"][target_indexes]
+                meta_target["iscrowd"] = targets[b]["iscrowd"][target_indexes]
+                meta_target["image_id"] = targets[b]["image_id"]
+                meta_target["size"] = targets[b]["size"]
+                meta_target["orig_size"] = targets[b]["orig_size"]
                 meta_targets.append(meta_target)
 
         # Create tensors for final outputs
         # default logits are -inf (default confidence scores are 0.00 after sigmoid)
-        final_meta_outputs_classes = torch.ones(hs.shape[0], batchsize, num_episode, self.num_queries, self.num_classes, device=device) * (-999999.99)
-        final_meta_outputs_coords = torch.zeros(hs.shape[0], batchsize, num_episode, self.num_queries, 4, device=device)
+        final_meta_outputs_classes = torch.ones(
+            hs.shape[0],
+            batchsize,
+            num_episode,
+            self.num_queries,
+            self.num_classes,
+            device=device,
+        ) * (-999999.99)
+        final_meta_outputs_coords = torch.zeros(
+            hs.shape[0], batchsize, num_episode, self.num_queries, 4, device=device
+        )
         # Fill in predicted logits into corresponding positions
         class_ids_already_filled_in = []
-        for episode_index, (pred_classes, pred_coords, class_ids) in enumerate(zip(meta_outputs_classes, meta_outputs_coords, meta_support_class_ids)):
+        for episode_index, (pred_classes, pred_coords, class_ids) in enumerate(
+            zip(meta_outputs_classes, meta_outputs_coords, meta_support_class_ids)
+        ):
             for class_index, class_id in enumerate(class_ids):
                 # During inference, we need to ignore the classes that already have predictions
                 # During training, the same category might appear over different episodes, so no need to filter
-                if self.training or (class_id.item() not in class_ids_already_filled_in):
+                if self.training or (
+                    class_id.item() not in class_ids_already_filled_in
+                ):
                     class_ids_already_filled_in.append(class_id.item())
-                    final_meta_outputs_classes[:, :, episode_index, :, class_id] = pred_classes[:, :, :, class_index]
-                    final_meta_outputs_coords[:, :, episode_index, :, :] = pred_coords[:, :, :, :]
+                    final_meta_outputs_classes[
+                        :, :, episode_index, :, class_id
+                    ] = pred_classes[:, :, :, class_index]
+                    final_meta_outputs_coords[:, :, episode_index, :, :] = pred_coords[
+                        :, :, :, :
+                    ]
         # Pretend we have a batchsize of (batchsize x num_support), and produce final predictions
-        final_meta_outputs_classes = final_meta_outputs_classes.view(hs.shape[0], batchsize * num_episode, self.num_queries, self.num_classes)
-        final_meta_outputs_coords = final_meta_outputs_coords.view(hs.shape[0], batchsize * num_episode, self.num_queries, 4)
+        final_meta_outputs_classes = final_meta_outputs_classes.view(
+            hs.shape[0], batchsize * num_episode, self.num_queries, self.num_classes
+        )
+        final_meta_outputs_coords = final_meta_outputs_coords.view(
+            hs.shape[0], batchsize * num_episode, self.num_queries, 4
+        )
 
         out = dict()
 
-        out['pred_logits'] = final_meta_outputs_classes[-1]
-        out['pred_boxes'] = final_meta_outputs_coords[-1]
-        out['activated_class_ids'] = torch.stack(meta_support_class_ids).unsqueeze(0).expand(batchsize, -1, -1).reshape(batchsize * num_episode, -1)
-        out['meta_targets'] = meta_targets  # Add meta_targets into outputs for optimization
+        out["pred_logits"] = final_meta_outputs_classes[-1]
+        out["pred_boxes"] = final_meta_outputs_coords[-1]
+        out["activated_class_ids"] = (
+            torch.stack(meta_support_class_ids)
+            .unsqueeze(0)
+            .expand(batchsize, -1, -1)
+            .reshape(batchsize * num_episode, -1)
+        )
+        out[
+            "meta_targets"
+        ] = meta_targets  # Add meta_targets into outputs for optimization
 
-        out['batchsize'] = batchsize
-        out['num_episode'] = num_episode
-        out['num_queries'] = self.num_queries
-        out['num_classes'] = self.num_classes
+        out["batchsize"] = batchsize
+        out["num_episode"] = num_episode
+        out["num_queries"] = self.num_queries
+        out["num_classes"] = self.num_classes
 
         if self.args.category_codes_cls_loss:
             if self.num_feature_levels == 1:
                 # out['category_codes_cls_logits'] = self.category_codes_cls(category_codes)
                 # out['category_codes_cls_targets'] = supp_class_ids
                 # TODO: category_codes_cls_loss @ every encoder layer! THIS IS ONLY TRIAL!
-                #out['category_codes_cls_logits'] = self.category_codes_cls(torch.cat(category_codes, dim=0))
-                #out['category_codes_cls_targets'] = supp_class_ids.repeat(self.args.dec_layers)
+                # out['category_codes_cls_logits'] = self.category_codes_cls(torch.cat(category_codes, dim=0))
+                # out['category_codes_cls_targets'] = supp_class_ids.repeat(self.args.dec_layers)
 
-                out['category_codes_cls_logits'] = self.category_codes_cls(category_codes[0])
-                out['category_codes_cls_targets'] = supp_class_ids
+                out["category_codes_cls_logits"] = self.category_codes_cls(
+                    category_codes[0]
+                )
+                out["category_codes_cls_targets"] = supp_class_ids
             elif self.num_feature_levels == 4:
                 raise NotImplementedError
             else:
                 raise NotImplementedError
 
         if self.aux_loss:
-            out['aux_outputs'] = self._set_aux_loss(final_meta_outputs_classes, final_meta_outputs_coords)
-            for aux_output in out['aux_outputs']:
-                aux_output['activated_class_ids'] = torch.stack(meta_support_class_ids).unsqueeze(0).expand(batchsize, -1, -1).reshape(batchsize * num_episode, -1)
+            out["aux_outputs"] = self._set_aux_loss(
+                final_meta_outputs_classes, final_meta_outputs_coords
+            )
+            for aux_output in out["aux_outputs"]:
+                aux_output["activated_class_ids"] = (
+                    torch.stack(meta_support_class_ids)
+                    .unsqueeze(0)
+                    .expand(batchsize, -1, -1)
+                    .reshape(batchsize * num_episode, -1)
+                )
         return out
 
     def compute_category_codes(self, supp_samples, supp_targets):
         num_supp = supp_samples.tensors.shape[0]
 
         if self.num_feature_levels == 1:
-            features, pos = self.backbone.forward_supp_branch(supp_samples, return_interm_layers=False)
+            features, pos = self.backbone.forward_supp_branch(
+                supp_samples, return_interm_layers=False
+            )
             srcs = []
             masks = []
             for l, feat in enumerate(features):
@@ -333,7 +469,7 @@ class MetaDETR(nn.Module):
                 masks.append(mask)
                 assert mask is not None
 
-            boxes = [box_ops.box_cxcywh_to_xyxy(t['boxes']) for t in supp_targets]
+            boxes = [box_ops.box_cxcywh_to_xyxy(t["boxes"]) for t in supp_targets]
             # and from relative [0, 1] to absolute [0, height] coordinates
             img_sizes = torch.stack([t["size"] for t in supp_targets], dim=0)
             img_h, img_w = img_sizes.unbind(1)
@@ -343,18 +479,54 @@ class MetaDETR(nn.Module):
 
             query_embeds = self.query_embed.to(src.device)
 
-            tsp = self.task_positional_encoding(torch.zeros(self.args.episode_size, self.hidden_dim, device=src.device)).unsqueeze(0).expand(num_supp, -1, -1)
+            tsp = (
+                self.task_positional_encoding(
+                    torch.zeros(
+                        self.args.episode_size, self.hidden_dim, device=src.device
+                    )
+                )
+                .unsqueeze(0)
+                .expand(num_supp, -1, -1)
+            )
 
             category_codes_list = list()
 
             for i in range(num_supp // self.args.episode_size):
                 category_codes_list.append(
-                    self.transformer.forward_supp_branch([srcs[0][i*self.args.episode_size: (i+1)*self.args.episode_size]],
-                                                         [masks[0][i*self.args.episode_size: (i+1)*self.args.episode_size]],
-                                                         [pos[0][i*self.args.episode_size: (i+1)*self.args.episode_size]],
-                                                         query_embeds,
-                                                         tsp[i*self.args.episode_size: (i+1)*self.args.episode_size],
-                                                         boxes[i*self.args.episode_size: (i+1)*self.args.episode_size])
+                    self.transformer.forward_supp_branch(
+                        [
+                            srcs[0][
+                                i
+                                * self.args.episode_size : (i + 1)
+                                * self.args.episode_size
+                            ]
+                        ],
+                        [
+                            masks[0][
+                                i
+                                * self.args.episode_size : (i + 1)
+                                * self.args.episode_size
+                            ]
+                        ],
+                        [
+                            pos[0][
+                                i
+                                * self.args.episode_size : (i + 1)
+                                * self.args.episode_size
+                            ]
+                        ],
+                        query_embeds,
+                        tsp[
+                            i
+                            * self.args.episode_size : (i + 1)
+                            * self.args.episode_size
+                        ],
+                        boxes[
+                            i
+                            * self.args.episode_size : (i + 1)
+                            * self.args.episode_size
+                        ],
+                    )
                 )
 
             final_category_codes_list = []
@@ -375,10 +547,15 @@ class MetaDETR(nn.Module):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_boxes': b} for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+        return [
+            {"pred_logits": a, "pred_boxes": b}
+            for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
+        ]
 
 
-def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2):
+def sigmoid_focal_loss(
+    inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2
+):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
     Args:
@@ -407,13 +584,16 @@ def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: f
 
 
 class SetCriterion(nn.Module):
-    """ This class computes the loss for Meta-DETR.
+    """This class computes the loss for Meta-DETR.
     The process happens in two steps:
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
-    def __init__(self, args, num_classes, matcher, weight_dict, losses, focal_alpha=0.25):
-        """ Create the criterion.
+
+    def __init__(
+        self, args, num_classes, matcher, weight_dict, losses, focal_alpha=0.25
+    ):
+        """Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
             matcher: module able to compute a matching between targets and proposals
@@ -433,123 +613,150 @@ class SetCriterion(nn.Module):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
-        assert 'pred_logits' in outputs
-        src_logits = outputs['pred_logits']
+        assert "pred_logits" in outputs
+        src_logits = outputs["pred_logits"]
         idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.full(src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device)
+        target_classes_o = torch.cat(
+            [t["labels"][J] for t, (_, J) in zip(targets, indices)]
+        )
+        target_classes = torch.full(
+            src_logits.shape[:2],
+            self.num_classes,
+            dtype=torch.int64,
+            device=src_logits.device,
+        )
         target_classes[idx] = target_classes_o
 
-        target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
-                                            dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
+        target_classes_onehot = torch.zeros(
+            [src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
+            dtype=src_logits.dtype,
+            layout=src_logits.layout,
+            device=src_logits.device,
+        )
         target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
 
         target_classes_onehot = target_classes_onehot[:, :, :-1]
 
         # ################### Only Produce Loss for Activated Categories ###################
-        activated_class_ids = outputs['activated_class_ids']   # (bs, num_support)
-        activated_class_ids = activated_class_ids.unsqueeze(1).repeat(1, target_classes_onehot.shape[1], 1)
-        loss_ce = sigmoid_focal_loss(src_logits.gather(2, activated_class_ids),
-                                     target_classes_onehot.gather(2, activated_class_ids),
-                                     num_boxes,
-                                     alpha=self.focal_alpha,
-                                     gamma=2)
+        activated_class_ids = outputs["activated_class_ids"]  # (bs, num_support)
+        activated_class_ids = activated_class_ids.unsqueeze(1).repeat(
+            1, target_classes_onehot.shape[1], 1
+        )
+        loss_ce = sigmoid_focal_loss(
+            src_logits.gather(2, activated_class_ids),
+            target_classes_onehot.gather(2, activated_class_ids),
+            num_boxes,
+            alpha=self.focal_alpha,
+            gamma=2,
+        )
 
         loss_ce = loss_ce * src_logits.shape[1]
 
-        losses = {'loss_ce': loss_ce}
+        losses = {"loss_ce": loss_ce}
 
         if log:
-            losses['class_error'] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
+            losses["class_error"] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
 
         return losses
 
     @torch.no_grad()
     def loss_cardinality(self, outputs, targets, indices, num_boxes):
-        """ Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
+        """Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
         This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
         """
-        pred_logits = outputs['pred_logits']
+        pred_logits = outputs["pred_logits"]
         device = pred_logits.device
-        tgt_lengths = torch.as_tensor([len(v["labels"]) for v in targets], device=device)
+        tgt_lengths = torch.as_tensor(
+            [len(v["labels"]) for v in targets], device=device
+        )
         # Count the number of predictions that are NOT "no-object" (which is the last class)
         card_pred = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)
         card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
-        losses = {'cardinality_error': card_err}
+        losses = {"cardinality_error": card_err}
         return losses
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
-           targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
-           The target boxes are expected in format (center_x, center_y, h, w), normalized by the image size.
+        targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
+        The target boxes are expected in format (center_x, center_y, h, w), normalized by the image size.
         """
-        assert 'pred_boxes' in outputs
+        assert "pred_boxes" in outputs
         idx = self._get_src_permutation_idx(indices)
-        src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        src_boxes = outputs["pred_boxes"][idx]
+        target_boxes = torch.cat(
+            [t["boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0
+        )
 
-        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
+        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction="none")
 
         losses = dict()
-        losses['loss_bbox'] = loss_bbox.sum() / num_boxes
+        losses["loss_bbox"] = loss_bbox.sum() / num_boxes
 
         loss_giou = 1 - torch.diag(
             box_ops.generalized_box_iou(
                 box_ops.box_cxcywh_to_xyxy(src_boxes),
-                box_ops.box_cxcywh_to_xyxy(target_boxes)
+                box_ops.box_cxcywh_to_xyxy(target_boxes),
             )
         )
-        losses['loss_giou'] = loss_giou.sum() / num_boxes
+        losses["loss_giou"] = loss_giou.sum() / num_boxes
 
         return losses
 
     def loss_category_codes_cls(self, outputs, targets, indices, num_boxes):
-        logits = outputs['category_codes_cls_logits']
-        targets = outputs['category_codes_cls_targets']
-        losses = {
-            "loss_category_codes_cls": F.cross_entropy(logits, targets)
-        }
+        logits = outputs["category_codes_cls_logits"]
+        targets = outputs["category_codes_cls_targets"]
+        losses = {"loss_category_codes_cls": F.cross_entropy(logits, targets)}
         return losses
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
-        batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
+        batch_idx = torch.cat(
+            [torch.full_like(src, i) for i, (src, _) in enumerate(indices)]
+        )
         src_idx = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx
 
     def _get_tgt_permutation_idx(self, indices):
         # permute targets following indices
-        batch_idx = torch.cat([torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)])
+        batch_idx = torch.cat(
+            [torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)]
+        )
         tgt_idx = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
-            'labels': self.loss_labels,
-            'cardinality': self.loss_cardinality,
-            'boxes': self.loss_boxes,
-            'category_codes_cls': self.loss_category_codes_cls,
+            "labels": self.loss_labels,
+            "cardinality": self.loss_cardinality,
+            "boxes": self.loss_boxes,
+            "category_codes_cls": self.loss_category_codes_cls,
         }
-        assert loss in loss_map, f'do you really want to compute {loss} loss?'
+        assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
     def forward(self, outputs):
-        """ This performs the loss computation.
+        """This performs the loss computation.
         Parameters:
              outputs: dict of tensors, see the output specification of the model for the format
         """
         # Since we are doing meta-learning over our constructed meta-tasks, the targets for these meta-tasks are
         # stored in outputs['meta_targets']. We dont use original targets.
-        targets = outputs['meta_targets']
+        targets = outputs["meta_targets"]
 
-        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs' and k != 'enc_outputs'}
+        outputs_without_aux = {
+            k: v
+            for k, v in outputs.items()
+            if k != "aux_outputs" and k != "enc_outputs"
+        }
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, targets)
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
-        num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
+        num_boxes = torch.as_tensor(
+            [num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device
+        )
 
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_boxes)
@@ -559,44 +766,49 @@ class SetCriterion(nn.Module):
         losses = {}
         for loss in self.losses:
             kwargs = {}
-            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes, **kwargs))
+            losses.update(
+                self.get_loss(loss, outputs, targets, indices, num_boxes, **kwargs)
+            )
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
-        if 'aux_outputs' in outputs:
-            for i, aux_outputs in enumerate(outputs['aux_outputs']):
+        if "aux_outputs" in outputs:
+            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
                 indices = self.matcher(aux_outputs, targets)
                 for loss in self.losses:
-                    if loss == 'category_codes_cls':
+                    if loss == "category_codes_cls":
                         # meta-attention cls loss not for aux_outputs
                         continue
                     kwargs = {}
-                    if loss == 'labels':
+                    if loss == "labels":
                         # Logging is enabled only for the last layer
-                        kwargs['log'] = False
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
-                    l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
+                        kwargs["log"] = False
+                    l_dict = self.get_loss(
+                        loss, aux_outputs, targets, indices, num_boxes, **kwargs
+                    )
+                    l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
         return losses
 
 
 class PostProcess(nn.Module):
-    """ This module converts the model's output into the format expected by the coco api"""
+    """This module converts the model's output into the format expected by the coco api"""
+
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
-        """ Perform the computation
+        """Perform the computation
         Parameters:
             outputs: raw outputs of the model
             target_sizes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
                           For evaluation, this must be the original image size (before any data augmentation)
                           For visualization, this should be the image size after data augment, but before padding
         """
-        out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
+        out_logits, out_bbox = outputs["pred_logits"], outputs["pred_boxes"]
 
-        batchsize = outputs['batchsize']
-        num_episode = outputs['num_episode']
-        num_queries = outputs['num_queries']
-        num_classes = outputs['num_classes']
+        batchsize = outputs["batchsize"]
+        num_episode = outputs["num_episode"]
+        num_queries = outputs["num_queries"]
+        num_classes = outputs["num_classes"]
 
         out_logits = out_logits.view(batchsize, num_episode * num_queries, num_classes)
         out_bbox = out_bbox.view(batchsize, num_episode * num_queries, 4)
@@ -605,7 +817,9 @@ class PostProcess(nn.Module):
         assert target_sizes.shape[1] == 2
 
         prob = out_logits.sigmoid()
-        topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
+        topk_values, topk_indexes = torch.topk(
+            prob.view(out_logits.shape[0], -1), 100, dim=1
+        )
         scores = topk_values
         topk_boxes = topk_indexes // out_logits.shape[2]
         labels = topk_indexes % out_logits.shape[2]
@@ -617,18 +831,24 @@ class PostProcess(nn.Module):
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :]
 
-        results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
+        results = [
+            {"scores": s, "labels": l, "boxes": b}
+            for s, l, b in zip(scores, labels, boxes)
+        ]
 
         return results
 
 
 class MLP(nn.Module):
-    """ Very simple multi-layer perceptron (also called FFN)"""
+    """Very simple multi-layer perceptron (also called FFN)"""
+
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.ModuleList(
+            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
+        )
 
     def forward(self, x):
         for i, layer in enumerate(self.layers):
@@ -636,56 +856,70 @@ class MLP(nn.Module):
         return x
 
 
-def build(args):
+def build(params):
 
-    if args.dataset_file in ['coco', 'coco_base']:
-        num_classes = 91
-    elif args.dataset_file in ['voc', 'voc_base1', 'voc_base2', 'voc_base3']:
-        num_classes = 21
-    else:
-        raise ValueError('Unknown args.dataset_file!')
+    # TODO: check why params can only read item with []
+    device = torch.device(params["device"])
 
-    device = torch.device(args.device)
+    # copy hidden dimention from transformer
+    backbone_params = params["backbone"]
+    backbone_params["hidden_dim"] = params["transformer"]["hidden_dim"]
+    backbone_params["lr_backbone"] = params["optimizer"]["lr_backbone"]
+    backbone = build_backbone(backbone_params)
 
-    backbone = build_backbone(args)
-    transformer = build_deforamble_transformer(args)
+    # copy num_feature_levels from backbone
+    transformer_params = params["transformer"]
+    transformer_params["num_feature_levels"] = params["backbone"]["num_feature_levels"]
+    transformer_params["category_codes_cls_loss"] = params["loss"][
+        "category_codes_cls_loss"
+    ]
+    transformer = build_deforamble_transformer(transformer_params)
     model = MetaDETR(
-        args,
+        transformer_params,
         backbone,
         transformer,
-        num_classes=num_classes,
-        num_queries=args.num_queries,
-        num_feature_levels=args.num_feature_levels,
-        aux_loss=args.aux_loss,
-        with_box_refine=args.with_box_refine,
+        num_classes=params["num_classes"],
+        num_queries=transformer_params["num_queries"],
+        num_feature_levels=transformer_params["num_feature_levels"],
+        aux_loss=params["loss"]["aux_loss"],
+        with_box_refine=params["with_box_refine"],
     )
 
-    matcher = build_matcher(args)
+    matcher = build_matcher(params["matcher"])
 
     weight_dict = dict()
-    weight_dict['loss_ce'] = args.cls_loss_coef
-    weight_dict['loss_bbox'] = args.bbox_loss_coef
-    weight_dict['loss_giou'] = args.giou_loss_coef
+    weight_dict["loss_ce"] = params["loss_coef"]["cls_loss_coef"]
+    weight_dict["loss_bbox"] = params["loss_coef"]["bbox_loss_coef"]
+    weight_dict["loss_giou"] = params["loss_coef"]["giou_loss_coef"]
 
-    if args.aux_loss:
+    if params["loss"]["aux_loss"]:
         aux_weight_dict = {}
-        for i in range(args.dec_layers - 1):
-            aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
-        aux_weight_dict.update({k + f'_enc': v for k, v in weight_dict.items()})
+        for i in range(params["transformer"]["dec_layers"] - 1):
+            aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
+        aux_weight_dict.update({k + f"_enc": v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
 
-    if args.category_codes_cls_loss:
-        weight_dict["loss_category_codes_cls"] = args.category_codes_cls_loss_coef
+    if params["loss"]["category_codes_cls_loss"]:
+        weight_dict["loss_category_codes_cls"] = params["loss_coef"][
+            "category_codes_cls_loss_coef"
+        ]
 
-    losses = ['labels', 'boxes', 'cardinality']
+    losses = ["labels", "boxes", "cardinality"]
 
-    if args.category_codes_cls_loss:
+    if params["loss"]["category_codes_cls_loss"]:
         losses += ["category_codes_cls"]
 
-    criterion = SetCriterion(args, num_classes, matcher, weight_dict, losses, focal_alpha=args.focal_alpha)
+    # TODO: debug it soon
+    criterion = SetCriterion(
+        params,
+        params["num_classes"],
+        matcher,
+        weight_dict,
+        losses,
+        focal_alpha=params["loss_coef"]["focal_alpha"],
+    )
     criterion.to(device)
 
-    postprocessors = {'bbox': PostProcess()}
+    postprocessors = {"bbox": PostProcess()}
 
     return model, criterion, postprocessors
-

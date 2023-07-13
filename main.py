@@ -91,7 +91,7 @@ def get_args_parser():
     # * Loss coefficients
     parser.add_argument('--mask_loss_coef', default=1.0, type=float)
     parser.add_argument('--dice_loss_coef', default=1.0, type=float)
-    parser.add_argument('--cls_loss_coef', default=2.0, type=float)
+    parser.add_argument('--cls_loss_coef', default=2.0, type=float)e
     parser.add_argument('--bbox_loss_coef', default=5.0, type=float)
     parser.add_argument('--giou_loss_coef', default=2.0, type=float)
     parser.add_argument('--category_codes_cls_loss_coef', default=5.0, type=float)

@@ -15,7 +15,7 @@ import torch
 from torch import nn
 from torch.autograd import Variable
 
-from util.misc import NestedTensor
+from ..util.misc import NestedTensor
 
 
 class PositionEmbeddingSine(nn.Module):
@@ -23,7 +23,10 @@ class PositionEmbeddingSine(nn.Module):
     This is a more standard version of the position embedding, very similar to the one
     used by the Attention is all you need paper, generalized to work on images.
     """
-    def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
+
+    def __init__(
+        self, num_pos_feats=64, temperature=10000, normalize=False, scale=None
+    ):
         super().__init__()
         self.num_pos_feats = num_pos_feats
         self.temperature = temperature
@@ -51,8 +54,12 @@ class PositionEmbeddingSine(nn.Module):
 
         pos_x = x_embed[:, :, :, None] / dim_t
         pos_y = y_embed[:, :, :, None] / dim_t
-        pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
-        pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
+        pos_x = torch.stack(
+            (pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4
+        ).flatten(3)
+        pos_y = torch.stack(
+            (pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4
+        ).flatten(3)
         pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
         return pos
 
@@ -61,6 +68,7 @@ class PositionEmbeddingLearned(nn.Module):
     """
     Absolute pos embedding, learned.
     """
+
     def __init__(self, num_pos_feats=256):
         super().__init__()
         self.row_embed = nn.Embedding(50, num_pos_feats)
@@ -78,10 +86,18 @@ class PositionEmbeddingLearned(nn.Module):
         j = torch.arange(h, device=x.device)
         x_emb = self.col_embed(i)
         y_emb = self.row_embed(j)
-        pos = torch.cat([
-            x_emb.unsqueeze(0).repeat(h, 1, 1),
-            y_emb.unsqueeze(1).repeat(1, w, 1),
-        ], dim=-1).permute(2, 0, 1).unsqueeze(0).repeat(x.shape[0], 1, 1, 1)
+        pos = (
+            torch.cat(
+                [
+                    x_emb.unsqueeze(0).repeat(h, 1, 1),
+                    y_emb.unsqueeze(1).repeat(1, w, 1),
+                ],
+                dim=-1,
+            )
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .repeat(x.shape[0], 1, 1, 1)
+        )
         return pos
 
 
@@ -92,14 +108,15 @@ class TaskPositionalEncoding(nn.Module):
         # Compute the task positional encodings once and for all in log space.
         tpe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) *
-                             -(math.log(10000.0) / d_model))
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model)
+        )
         tpe[:, 0::2] = torch.sin(position * div_term)
         tpe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('tpe', tpe)
+        self.register_buffer("tpe", tpe)
 
     def forward(self, x):
-        x = x + torch.flip(Variable(self.tpe[:x.size(1)], requires_grad=False), [1])
+        x = x + torch.flip(Variable(self.tpe[: x.size(1)], requires_grad=False), [1])
         return self.dropout(x)
 
 
@@ -110,10 +127,12 @@ class QueryEncoding(nn.Module):
         # Compute the query encodings once and for all in log space.
         queryencoding = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model)
+        )
         queryencoding[:, 0::2] = torch.sin(position * div_term)
         queryencoding[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('queryencoding', queryencoding)
+        self.register_buffer("queryencoding", queryencoding)
 
     def forward(self):
         x = Variable(self.queryencoding, requires_grad=False)
@@ -122,9 +141,9 @@ class QueryEncoding(nn.Module):
 
 def build_position_encoding(args):
     N_steps = args.hidden_dim // 2
-    if args.position_embedding in ('v2', 'sine'):
+    if args.position_embedding in ("v2", "sine"):
         position_embedding = PositionEmbeddingSine(N_steps, normalize=True)
-    elif args.position_embedding in ('v3', 'learned'):
+    elif args.position_embedding in ("v3", "learned"):
         position_embedding = PositionEmbeddingLearned(N_steps)
     else:
         raise ValueError(f"not supported {args.position_embedding}")
